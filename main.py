@@ -3,9 +3,9 @@ import re
 import time
 import pandas as pd
 from typing import Optional
+import sys, asyncio
 
 from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,16 +13,15 @@ from pydantic import BaseModel
 # --- Gemini (Google AI) ---
 import google.generativeai as genai
 
-# --- Selenium ---
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+# --- Playwright ---
+from playwright.sync_api import sync_playwright
+
+# Fix for Playwright subprocess issue on Windows
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from dotenv import load_dotenv
 load_dotenv()
-
 
 #############################################
 # Config
@@ -56,146 +55,111 @@ def extract_price_gemini(user_message: str):
         if result.upper() == "NULL":
             return None
         
-        
-        print(response.text)
         return int(re.search(r"\d+", result).group())
     except Exception:
         return None
 
 
-def build_driver(headless: bool = True):
-    options = webdriver.ChromeOptions()
-    if headless:
-        options.add_argument("--headless=new")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument("--start-maximized")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-    )
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    driver.set_page_load_timeout(60)
-    return driver
-
-
-def scroll_to_bottom(driver, max_loops: int = 15, pause: float = 1.2):
-    """Scroll until height stops changing or until max_loops reached."""
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    loops = 0
-    while loops < max_loops:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(pause)
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            break
-        last_height = new_height
-        loops += 1
-
-
-def parse_price_to_int(price_text: str):
-    if not price_text:
-        return None
-    m = re.search(r"\d+", price_text.replace(" ", ""))
-    return int(m.group()) if m else None
-
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-import time
-import pandas as pd
-
-
+#############################################
+# Playwright Scraper
+#############################################
 def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
-    """Scrape Ouedkniss automobiles within [minprice, maxprice] (Millions). Returns DataFrame."""
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")  
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
+    """Scrape Ouedkniss automobiles with Playwright. Returns list of cars."""
+    data = {"name": [], "price": [], "location": [], "date": [], "url": [], "image": []}
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    url = (
+        f"https://www.ouedkniss.com/automobiles_vehicules/{start_page}?"
+        f"priceUnit=MILLION&priceRangeMin={minprice}&priceRangeMax={maxprice}"
+    )
+    print(f"Fetching URL: {url}")
 
-    data = {
-        "name": [],
-        "price": [],
-        "location": [],
-        "date": [],
-        "url": [],
-        "image": []
-    }
-
-    try:
-        url = (
-            f"https://www.ouedkniss.com/automobiles_vehicules/{start_page}?"
-            f"priceUnit=MILLION&priceRangeMin={minprice}&priceRangeMax={maxprice}"
-        )
-        print(f"Fetching URL: {url}")
-        driver.get(url)
-
-        for p in range(pages):
-            # wait for cards to appear
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.o-announ-card-content"))
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
             )
+        )
+        page = context.new_page()
+        page.goto(url, timeout=60000)
 
-            # scroll until end
-            last_height = driver.execute_script("return document.body.scrollHeight")
-            while True:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)
-                new_height = driver.execute_script("return document.body.scrollHeight")
+        # ✅ Wait for loader to disappear (both detached & hidden)
+        try:
+            page.wait_for_selector("#loader", state="detached", timeout=20000)
+        except:
+            try:
+                page.wait_for_selector("#loader", state="hidden", timeout=5000)
+            except:
+                print("⚠️ Loader not found/handled, continuing...")
+
+        # ✅ Ensure network is quiet
+        page.wait_for_load_state("networkidle")
+        page.screenshot(path="debug.png", full_page=True)
+
+        # ✅ More flexible wait: handle both possible selectors
+        page.wait_for_selector("a.o-announ-card-content, a.v-card.o-announ-card-content", timeout=60000)
+
+        for p_i in range(pages):
+            print(f"Scraping page {p_i+1}...")
+
+            # ✅ Scroll stepwise to trigger lazy loading
+            last_height = 0
+            for _ in range(20):
+                page.evaluate("window.scrollBy(0, 400)")
+                time.sleep(0.5)
+                new_height = page.evaluate("document.body.scrollHeight")
                 if new_height == last_height:
                     break
                 last_height = new_height
 
-            # extract cars
-            cars = driver.find_elements(By.CSS_SELECTOR, "a.o-announ-card-content")
+            # ✅ Ensure car cards exist
+            try:
+                page.wait_for_selector("a.o-announ-card-content, a.v-card.o-announ-card-content", timeout=20000)
+            except Exception as e:
+                html_snippet = page.content()[:1000]
+                print("DEBUG PAGE HTML:", html_snippet)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not find car cards: {str(e)}"
+                )
+
+            # ✅ Extract car cards
+            cars = page.query_selector_all("a.o-announ-card-content, a.v-card.o-announ-card-content")
+            print(f"Found {len(cars)} cars on page {p_i+1}")
 
             for car in cars:
-                try:
-                    name = car.find_element(By.CSS_SELECTOR, "h3.o-announ-card-title").text.strip()
-                except:
-                    name = None
+                name = car.query_selector("h3.o-announ-card-title")
+                name = name.inner_text().strip() if name else None
 
+                # price: combine number + unit
                 try:
-                    price_txt = car.find_element(By.CSS_SELECTOR, "div.mr-1").text.strip()
+                    price_num = car.query_selector("div.mr-1")
+                    price_unit = car.query_selector("div:has-text('Millions')")
+                    price_txt = ""
+                    if price_num:
+                        price_txt += price_num.inner_text().strip()
+                    if price_unit:
+                        price_txt += " " + price_unit.inner_text().strip()
                 except:
                     price_txt = None
 
-                try:
-                    location = car.find_element(By.CSS_SELECTOR, "span.o-announ-card-city").text.strip()
-                except:
-                    location = None
+                location = car.query_selector("span.o-announ-card-city")
+                location = location.inner_text().strip() if location else None
 
-                try:
-                    date_txt = car.find_element(By.CSS_SELECTOR, "span.o-announ-card-date").text.strip()
-                except:
-                    date_txt = None
+                date_txt = car.query_selector("span.o-announ-card-date")
+                date_txt = date_txt.inner_text().strip() if date_txt else None
 
-                try:
-                    url = car.get_attribute("href")
-                except:
-                    url = None
-                
-                try:
-                    # find the first <source> with type="image/webp"
-                    image = car.find_element(By.CSS_SELECTOR, "source[type='image/webp']").get_attribute("srcset")
-                    
-                    
-                except:
-                    image = None
+                url = car.get_attribute("href")
+
+                # image: get largest available
+                image = car.query_selector("source[type='image/webp']")
+                image = image.get_attribute("srcset") if image else None
 
                 # validate & clean price
                 if price_txt:
-                    price_num = price_txt.replace(" ", "")
+                    price_num = price_txt.replace(" ", "").replace("Millions", "")
                     if price_num.isdigit():
                         price_num = int(price_num)
                         if price_num not in (111, 123) and minprice <= price_num <= maxprice:
@@ -206,24 +170,27 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
                             data["url"].append(url)
                             data["image"].append(image)
 
-            # next page
-            if p < pages - 1:
+            # ✅ Next page
+            if p_i < pages - 1:
                 try:
-                    next_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Page suivante']")
-                    if next_btn.is_enabled():
-                        driver.execute_script("arguments[0].click();", next_btn)
-                        time.sleep(3)
+                    next_btn = page.query_selector("button[aria-label='Page suivante']")
+                    if next_btn and next_btn.is_enabled():
+                        next_btn.click()
+                        try:
+                            page.wait_for_selector("#loader", state="detached", timeout=10000)
+                        except:
+                            page.wait_for_timeout(2000)
                     else:
                         print("Next button disabled. Stopping.")
                         break
                 except:
                     print("No more pages.")
                     break
-    finally:
-        driver.quit()
+
+        browser.close()
 
     df = pd.DataFrame(data)
-    print(f"Scraped {len(df)} cars")
+    print(f"✅ Scraped {len(df)} cars in total")
     return data
 
 #############################################
@@ -235,22 +202,18 @@ app = FastAPI(
     description="Scrapes Ouedkniss cars and extracts prices with Gemini AI",
 )
 
-# Add CORS middleware
+origins = [
+    "http://localhost:2000",
+    "http://204.12.218.86:2000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins= ["*"],  # or ["*"] to allow all (less secure)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Mount static files
-
-
-# Serve React app
-@app.get("/")
-def serve_react_app():
-    return FileResponse("website/build/index.html")
 
 @app.get("/static/{path:path}")
 def serve_static(path: str):
@@ -266,8 +229,6 @@ class SearchRequest(BaseModel):
     start_page: Optional[int] = 1
 
 
-
-
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -275,9 +236,11 @@ def health():
 
 @app.post("/search")
 def search(req: SearchRequest):
+    print('////////////////////')
+    print("Search request:", req.dict())
     message = req.message
     margin = req.margin
-    pages = 5
+    pages = req.pages or 5
     minprice = req.minprice
     maxprice = req.maxprice
     start_page = req.start_page
@@ -301,6 +264,6 @@ def search(req: SearchRequest):
             "max": maxprice,
             "pages": pages
         },
-        "count": len(results),
+        "count": len(results["name"]),
         "results": results
     }
