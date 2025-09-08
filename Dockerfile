@@ -5,12 +5,17 @@ RUN apt-get update && apt-get install -y \
     wget gnupg curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright + dependencies
-RUN pip install --no-cache-dir fastapi uvicorn[standard] playwright
-RUN playwright install --with-deps
-
 # Set workdir
 WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers
+RUN playwright install --with-deps chromium
 
 # Copy project files
 COPY . /app
