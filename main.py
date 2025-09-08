@@ -74,7 +74,7 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
     print(f"Fetching URL: {url}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent=(
@@ -95,7 +95,7 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
                 print("⚠️ Loader not found/handled, continuing...")
 
         # ✅ Ensure network is quiet
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("domcontentloaded")  #
         page.screenshot(path="debug.png", full_page=True)
 
         # ✅ More flexible wait: handle both possible selectors
@@ -133,17 +133,14 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
                 name = car.query_selector("h3.o-announ-card-title")
                 name = name.inner_text().strip() if name else None
 
-                # price: combine number + unit
+                # price: extract just the number
                 try:
-                    price_num = car.query_selector("div.mr-1")
-                    price_unit = car.query_selector("div:has-text('Millions')")
-                    price_txt = ""
-                    if price_num:
-                        price_txt += price_num.inner_text().strip()
-                    if price_unit:
-                        price_txt += " " + price_unit.inner_text().strip()
+                    price_element = car.query_selector("div.mr-1")
+                    price_txt = price_element.inner_text().strip() if price_element else None
                 except:
                     price_txt = None
+                
+                print(f"Name: {name}, Price: {price_txt}")
 
                 location = car.query_selector("span.o-announ-card-city")
                 location = location.inner_text().strip() if location else None
@@ -157,18 +154,26 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
                 image = car.query_selector("source[type='image/webp']")
                 image = image.get_attribute("srcset") if image else None
 
-                # validate & clean price
+                # validate & clean price - extract only digits
                 if price_txt:
-                    price_num = price_txt.replace(" ", "").replace("Millions", "")
-                    if price_num.isdigit():
-                        price_num = int(price_num)
-                        if price_num not in (111, 123) and minprice <= price_num <= maxprice:
+                    # Extract only digits from the price text
+                    import re
+                    price_digits = re.findall(r'\d+', price_txt)
+                    if price_digits:
+                        price_num = int(price_digits[0])  # Take the first number found
+                        print(f"Extracted price: {price_num}")
+                        
+                        # Filter out invalid prices (123, 111, 1)
+                        if price_num not in [123, 111, 1]:
+                            # Add car data
                             data["name"].append(name)
                             data["price"].append(price_num)
                             data["location"].append(location)
                             data["date"].append(date_txt)
                             data["url"].append(url)
                             data["image"].append(image)
+                        else:
+                            print(f"Filtered out car with invalid price: {price_num}")
 
             # ✅ Next page
             if p_i < pages - 1:
@@ -189,8 +194,8 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
 
         browser.close()
 
-    df = pd.DataFrame(data)
-    print(f"✅ Scraped {len(df)} cars in total")
+   
+   
     return data
 
 #############################################
@@ -257,6 +262,20 @@ def search(req: SearchRequest):
 
     results = get_cars(minprice=minprice, maxprice=maxprice, start_page=start_page, pages=pages)
 
+    # Ensure all arrays exist and have the same length
+    car_count = len(results["name"])
+    print(f"Found {car_count} cars")
+    print(f"Results structure: {list(results.keys())}")
+    for key in results.keys():
+        print(f"  {key}: {len(results[key])} items")
+    
+    # Make sure all arrays have the same length
+    for key in ["name", "price", "location", "date", "url", "image"]:
+        if len(results[key]) != car_count:
+            # Pad with None values if needed
+            while len(results[key]) < car_count:
+                results[key].append(None)
+
     return {
         "query": {
             "message": message,
@@ -264,6 +283,6 @@ def search(req: SearchRequest):
             "max": maxprice,
             "pages": pages
         },
-        "count": len(results["name"]),
+        "count": car_count,
         "results": results
     }
