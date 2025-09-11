@@ -64,7 +64,7 @@ def extract_price_gemini(user_message: str):
 # Playwright Scraper
 #############################################
 def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
-    """Scrape Ouedkniss automobiles with Playwright. Returns list of cars."""
+    """Scrape Ouedkniss automobiles with Playwright. Returns dict of lists."""
     data = {"name": [], "price": [], "location": [], "date": [], "url": [], "image": []}
 
     url = (
@@ -74,37 +74,34 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
     print(f"Fetching URL: {url}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # ✅ Force headless in server
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-            )
+            ),
         )
         page = context.new_page()
-        page.goto(url, timeout=60000)
 
-        # ✅ Wait for loader to disappear (both detached & hidden)
+        # safer navigation
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        # wait loader
         try:
             page.wait_for_selector("#loader", state="detached", timeout=20000)
         except:
-            try:
-                page.wait_for_selector("#loader", state="hidden", timeout=5000)
-            except:
-                print("⚠️ Loader not found/handled, continuing...")
+            print("⚠️ Loader not found, continuing...")
 
-        # ✅ Ensure network is quiet
-        page.wait_for_load_state("domcontentloaded")  #
-        page.screenshot(path="debug.png", full_page=True)
-
-        # ✅ More flexible wait: handle both possible selectors
-        page.wait_for_selector("a.o-announ-card-content, a.v-card.o-announ-card-content", timeout=60000)
+        # wait for car cards
+        page.wait_for_selector(
+            "a.o-announ-card-content, a.v-card.o-announ-card-content", timeout=60000
+        )
 
         for p_i in range(pages):
             print(f"Scraping page {p_i+1}...")
 
-            # ✅ Scroll stepwise to trigger lazy loading
+            # scroll for lazy load
             last_height = 0
             for _ in range(20):
                 page.evaluate("window.scrollBy(0, 400)")
@@ -114,33 +111,21 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
                     break
                 last_height = new_height
 
-            # ✅ Ensure car cards exist
-            try:
-                page.wait_for_selector("a.o-announ-card-content, a.v-card.o-announ-card-content", timeout=20000)
-            except Exception as e:
-                html_snippet = page.content()[:1000]
-                print("DEBUG PAGE HTML:", html_snippet)
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Could not find car cards: {str(e)}"
-                )
-
-            # ✅ Extract car cards
-            cars = page.query_selector_all("a.o-announ-card-content, a.v-card.o-announ-card-content")
+            # extract car cards
+            cars = page.query_selector_all(
+                "a.o-announ-card-content, a.v-card.o-announ-card-content"
+            )
             print(f"Found {len(cars)} cars on page {p_i+1}")
 
             for car in cars:
                 name = car.query_selector("h3.o-announ-card-title")
                 name = name.inner_text().strip() if name else None
 
-                # price: extract just the number
                 try:
                     price_element = car.query_selector("div.mr-1")
                     price_txt = price_element.inner_text().strip() if price_element else None
                 except:
                     price_txt = None
-                
-                print(f"Name: {name}, Price: {price_txt}")
 
                 location = car.query_selector("span.o-announ-card-city")
                 location = location.inner_text().strip() if location else None
@@ -149,53 +134,39 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
                 date_txt = date_txt.inner_text().strip() if date_txt else None
 
                 url = car.get_attribute("href")
-
-                # image: get largest available
                 image = car.query_selector("source[type='image/webp']")
                 image = image.get_attribute("srcset") if image else None
 
-                # validate & clean price - extract only digits
+                # clean price
+                price_num = None
                 if price_txt:
-                    # Extract only digits from the price text
-                    import re
-                    price_digits = re.findall(r'\d+', price_txt)
-                    if price_digits:
-                        price_num = int(price_digits[0])  # Take the first number found
-                        print(f"Extracted price: {price_num}")
-                        
-                        # Filter out invalid prices (123, 111, 1)
-                        if price_num not in [123, 111, 1]:
-                            # Add car data
-                            data["name"].append(name)
-                            data["price"].append(price_num)
-                            data["location"].append(location)
-                            data["date"].append(date_txt)
-                            data["url"].append(url)
-                            data["image"].append(image)
-                        else:
-                            print(f"Filtered out car with invalid price: {price_num}")
+                    digits = re.findall(r"\d+", price_txt)
+                    if digits:
+                        price_num = int(digits[0])
 
-            # ✅ Next page
+                if price_num and price_num not in [123, 111, 1]:
+                    data["name"].append(name)
+                    data["price"].append(price_num)
+                    data["location"].append(location)
+                    data["date"].append(date_txt)
+                    data["url"].append(url)
+                    data["image"].append(image)
+
+            # next page
             if p_i < pages - 1:
-                try:
-                    next_btn = page.query_selector("button[aria-label='Page suivante']")
-                    if next_btn and next_btn.is_enabled():
-                        next_btn.click()
-                        try:
-                            page.wait_for_selector("#loader", state="detached", timeout=10000)
-                        except:
-                            page.wait_for_timeout(2000)
-                    else:
-                        print("Next button disabled. Stopping.")
-                        break
-                except:
+                next_btn = page.query_selector("button[aria-label='Page suivante']")
+                if next_btn and next_btn.is_enabled():
+                    next_btn.click()
+                    try:
+                        page.wait_for_selector("#loader", state="detached", timeout=10000)
+                    except:
+                        page.wait_for_timeout(2000)
+                else:
                     print("No more pages.")
                     break
 
         browser.close()
 
-   
-   
     return data
 
 #############################################
@@ -259,6 +230,8 @@ def search(req: SearchRequest):
 
     minprice = int(minprice)
     maxprice = int(maxprice)
+    print(minprice)
+    print('***********')
 
     results = get_cars(minprice=minprice, maxprice=maxprice, start_page=start_page, pages=pages)
 
