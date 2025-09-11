@@ -74,7 +74,7 @@ def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
     print(f"Fetching URL: {url}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)  # ✅ Force headless in server
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent=(
