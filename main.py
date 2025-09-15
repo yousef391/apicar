@@ -63,7 +63,7 @@ def extract_price_gemini(user_message: str):
 #############################################
 # Playwright Scraper
 #############################################
-def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 5):
+def get_cars(minprice: int, maxprice: int, start_page: int = 1, pages: int = 1):
     """Scrape Ouedkniss automobiles with Playwright. Returns dict of lists."""
     data = {"name": [], "price": [], "location": [], "date": [], "url": [], "image": []}
 
